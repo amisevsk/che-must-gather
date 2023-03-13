@@ -42,6 +42,8 @@ WORKSPACE_NAMESPACE=""
 
 USAGE="Usage: ./get-debug-info.sh [OPTIONS]
 
+
+
 This script requires kubectl and jq.
 
 Options:
@@ -49,9 +51,12 @@ Options:
         Output debug information into specific directory. Directory must not already
         exist. By default, files will be output to ./che-debug-<timestamp>
     --workspace-name <NAME>
-        Gather debugging information on a specific workspace with provided name.
+        Gather debugging information on a specific workspace with provided name. Optional
     --workspace-namespace <NAMESPACE>
-        Gather debugging information on a specific workspace in provided namespace.
+        Gather debugging information on a specific workspace in provided namespace. Optional
+    --checluster-namespace <NAMESPACE>
+        Use provided namespace to search for CheCluster. Optional: by defualt all namespaces
+        are searched for CheClusters.
     -z, --zip
         Compress debug information to a zip file for sharing in a bug report.
     --help
@@ -91,6 +96,8 @@ function parse_arguments() {
       WORKSPACE_NAME="$2"; shift;;
       '--workspace-namespace')
       WORKSPACE_NAMESPACE="$2"; shift;;
+      '--checluster-namespace')
+      CHECLUSTER_NS="$2"; shift;;
       '--help')
       print_usage; exit 0;;
       *)
@@ -161,16 +168,22 @@ function detect_install() {
 
   # Find CheCluster to get install namespace
   local CHECLUSTERS NUM_CHECLUSTERS
-  CHECLUSTERS=$(kubectl get checlusters --all-namespaces -o json)
-  NUM_CHECLUSTERS=$(echo "$CHECLUSTERS" | jq '.items | length')
+  if [ -z "$CHECLUSTER_NS" ]; then
+    # No namespace specified -- search whole cluster for CheClusters. This requires higher permissions
+    CHECLUSTERS=$(kubectl get checlusters --all-namespaces -o json)
+    NUM_CHECLUSTERS=$(echo "$CHECLUSTERS" | jq '.items | length')
+  else
+    CHECLUSTERS=$(kubectl get checlusters -n "$CHECLUSTER_NS" -o json)
+    NUM_CHECLUSTERS=$(echo "$CHECLUSTERS" | jq '.items | length')
+  fi
   if [ "$NUM_CHECLUSTERS" == "0" ]; then
     warning "No CheClusters found in cluster, cannot get CheCluster info"
   else
     if [ "$NUM_CHECLUSTERS" != "1" ]; then
       warning "Found $NUM_CHECLUSTERS in cluster, checking only the first"
     fi
-    CHECLUSTER_NAME=$(echo "$CHECLUSTERS" | jq -r '.items[0].metadata.name')
     CHECLUSTER_NS=$(echo "$CHECLUSTERS" | jq -r '.items[0].metadata.namespace')
+    CHECLUSTER_NAME=$(echo "$CHECLUSTERS" | jq -r '.items[0].metadata.name')
   fi
 }
 
@@ -297,14 +310,14 @@ parse_arguments "$@"
 preflight_checks
 
 detect_install
-cat <<EOF
-Detected installation:
-  * Che Operator installed in namespace $OPERATOR_NS
-  * DevWorkspace Operator installed in namespace $DWO_OPERATOR_NS
-  * Che installed in namespace $CHECLUSTER_NS
-
-Results will be saved to $OUT_DIR
-EOF
+echo "Detected installation:"
+echo "  * Che Operator installed in namespace $OPERATOR_NS"
+echo "  * DevWorkspace Operator installed in namespace $DWO_OPERATOR_NS"
+if [ "$CHECLUSTER_NAME" != "" ]; then
+  echo "  * Che installed in namespace $CHECLUSTER_NS"
+fi
+echo ""
+echo "Results will be saved to $OUT_DIR"
 
 gather_devworkspace_operator
 
