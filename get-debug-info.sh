@@ -10,8 +10,11 @@ OPERATOR_DIR="$OUT_DIR/operators/che-operator/"
 CHECLUSTER_DIR="$OUT_DIR/checluster/"
 WORKSPACE_DIR="$OUT_DIR/devworkspaces/"
 
-# Variables for operator + checluster CR install namespaces
-PLATFORM=""
+# Variables to distinguish between Eclipse Che and Dev Spaces installs on OpenShift or Kubernetes
+OPERATOR_DIST=""      # che or devspaces
+PLATFORM=""           # kubernetes or openshift
+
+# Variables for operator + checluster CR install namespaces. Set in detect_install
 DWO_OPERATOR_NS=""
 DWO_CSV_NAME=""
 OPERATOR_NS=""
@@ -19,12 +22,12 @@ OPERATOR_CSV_NAME=""
 CHECLUSTER_NS=""
 CHECLUSTER_NAME=""
 
-# Variables related to operator installation
-CHE_OPERATOR_NAME="Eclipse Che"
-CHE_OPERATOR_DEPLOY="che-operator"
-CHE_OPERATOR_LABEL_SELECTOR="app=che-operator"
-CHE_OPERATOR_SERVICE_NAME="che-operator-service"
-CHE_DEPLOYMENT_NAMES="che che-dashboard che-gateway devfile-registry plugin-registry"
+# Variables related to operator installation. Set in detect_install
+OPERATOR_NAME=""
+OPERATOR_DEPLOY=""
+OPERATOR_LABEL_SELECTOR=""
+OPERATOR_SERVICE_NAME=""
+DEPLOYMENT_NAMES=""
 
 # Variables related to the DevWorkspace Operator installation
 DWO_OPERATOR_NAME="DevWorkspace Operator"
@@ -89,10 +92,6 @@ function parse_arguments() {
     case $key in
       '-d'|'--dest-dir')
       OUT_DIR="$2";
-      DWO_DIR="$OUT_DIR/operators/devworkspace/"
-      OPERATOR_DIR="$OUT_DIR/operators/che-operator/"
-      CHECLUSTER_DIR="$OUT_DIR/checluster/"
-      WORKSPACE_DIR="$OUT_DIR/devworkspaces/"
       shift;;
       '-z'|'--zip')
       ZIP="true";;
@@ -150,6 +149,37 @@ function detect_install() {
     PLATFORM="kubernetes"
   fi
 
+  # Figure out if Eclipse Che or Dev Spaces is installed
+  if [ "$PLATFORM" == "openshift" ]; then
+    if kubectl get csv -n openshift-operators -o name | grep -q eclipse-che; then
+      OPERATOR_DIST="che"
+      OPERATOR_NAME="Eclipse Che"
+      OPERATOR_DEPLOY="che-operator"
+      OPERATOR_LABEL_SELECTOR="app=che-operator"
+      OPERATOR_SERVICE_NAME="che-operator-service"
+      DEPLOYMENT_NAMES="che che-dashboard che-gateway devfile-registry plugin-registry"
+    elif kubectl get csv -n openshift-operators -o name | grep -q devspacesoperator; then
+      OPERATOR_DIST="devspaces"
+      OPERATOR_NAME="Red Hat OpenShift Dev Spaces"
+      OPERATOR_DEPLOY="devspaces-operator"
+      OPERATOR_LABEL_SELECTOR="app=devspaces-operator"
+      OPERATOR_SERVICE_NAME="devspaces-operator-service"
+      DEPLOYMENT_NAMES="devspaces devspaces-dashboard che-gateway devfile-registry plugin-registry"
+    else
+      error "Could not find operator installation"
+      exit 1
+    fi
+  else
+    # No Dev Spaces on Kubernetes
+    OPERATOR_DIST="che"
+    OPERATOR_NAME="Eclipse Che"
+    OPERATOR_DEPLOY="che-operator"
+    OPERATOR_LABEL_SELECTOR="app=che-operator"
+    OPERATOR_SERVICE_NAME="che-operator-service"
+    DEPLOYMENT_NAMES="che che-dashboard che-gateway devfile-registry plugin-registry"
+  fi
+  info "Detected $OPERATOR_NAME install in cluster"
+
   # Find operator install namespaces and CSVs (if present)
   if [ "$PLATFORM" = "openshift" ]; then
     # CSVs get copied to every namespace, so we can just check openshift-operators even if the operator is not installed there
@@ -162,7 +192,7 @@ function detect_install() {
         .metadata.labels."olm.copiedFrom"
       end
       ')
-    OPERATOR_CSV_NAME=$(kubectl get csv -n openshift-operators -o json | jq -r --arg OPERATOR_NAME "$CHE_OPERATOR_NAME" '.items[] | select(.spec.displayName == $OPERATOR_NAME) | .metadata.name')
+    OPERATOR_CSV_NAME=$(kubectl get csv -n openshift-operators -o json | jq -r --arg OPERATOR_NAME "$OPERATOR_NAME" '.items[] | select(.spec.displayName == $OPERATOR_NAME) | .metadata.name')
     OPERATOR_NS=$(kubectl get csv "$OPERATOR_CSV_NAME" -o json | jq -r '
       if .status.reason == "InstallSucceeded"
       then
@@ -173,7 +203,7 @@ function detect_install() {
       ')
   else
     DWO_OPERATOR_NS=$(kubectl get deploy --all-namespaces -l "$DWO_OPERATOR_LABEL_SELECTOR" -o jsonpath="{..metadata.namespace}")
-    OPERATOR_NS=$(kubectl get deploy --all-namespaces -l "$CHE_OPERATOR_LABEL_SELECTOR" -o jsonpath="{..metadata.namespace}")
+    OPERATOR_NS=$(kubectl get deploy --all-namespaces -l "$OPERATOR_LABEL_SELECTOR" -o jsonpath="{..metadata.namespace}")
   fi
 
   # Find CheCluster to get install namespace
@@ -275,7 +305,7 @@ function gather_devworkspace_operator() {
 }
 
 function gather_che_operator() {
-  info "Getting information about $CHE_OPERATOR_NAME installation"
+  info "Getting information about $OPERATOR_NAME installation"
   mkdir -p "$OPERATOR_DIR"
   if [ "$PLATFORM" == "openshift" ]; then
     # Get CSV
@@ -284,10 +314,10 @@ function gather_che_operator() {
   fi
 
   # Gather info about controller
-  kubectl get deploy "$CHE_OPERATOR_DEPLOY" -n "$OPERATOR_NS" -o yaml > "$OPERATOR_DIR/controller.deploy.yaml"
-  kubectl get po -l "$CHE_OPERATOR_LABEL_SELECTOR" -n "$OPERATOR_NS" -o yaml > "$OPERATOR_DIR/controller.pods.yaml"
-  kubectl get svc "$CHE_OPERATOR_SERVICE_NAME" -n "$OPERATOR_NS" -o yaml > "$OPERATOR_DIR/controller.svc.yaml"
-  pod_logs "$CHE_OPERATOR_DEPLOY" "$OPERATOR_NS" "$OPERATOR_DIR"
+  kubectl get deploy "$OPERATOR_DEPLOY" -n "$OPERATOR_NS" -o yaml > "$OPERATOR_DIR/controller.deploy.yaml"
+  kubectl get po -l "$OPERATOR_LABEL_SELECTOR" -n "$OPERATOR_NS" -o yaml > "$OPERATOR_DIR/controller.pods.yaml"
+  kubectl get svc "$OPERATOR_SERVICE_NAME" -n "$OPERATOR_NS" -o yaml > "$OPERATOR_DIR/controller.svc.yaml"
+  pod_logs "$OPERATOR_DEPLOY" "$OPERATOR_NS" "$OPERATOR_DIR"
   kubectl get events -n "$OPERATOR_NS" -o yaml > "$OPERATOR_DIR/events.yaml" 2>/dev/null
   kubectl get events -n "$OPERATOR_NS" > "$OPERATOR_DIR/events.txt" 2>/dev/null
 }
@@ -296,12 +326,13 @@ function gather_checluster() {
   info "Getting information about CheCluster and related deployments"
   mkdir -p "$CHECLUSTER_DIR"
   kubectl get checlusters "$CHECLUSTER_NAME" -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/checluster.yaml"
-  for deploy in $CHE_DEPLOYMENT_NAMES; do
+  for deploy in $DEPLOYMENT_NAMES; do
     mkdir -p "$CHECLUSTER_DIR/$deploy/"
     kubectl get deploy "$deploy" -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/$deploy/deployment.yaml"
     pod_logs "$deploy" "$CHECLUSTER_NS" "$CHECLUSTER_DIR/$deploy/"
-    if [ "$deploy" == "che" ]; then
-      kubectl get svc "$deploy-host" -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/$deploy/service.yaml"
+    if [ "$deploy" == "che" ] || [ "$deploy" == "devspaces" ]; then
+      # Even if the install is Dev Spaces, the service is named che-host
+      kubectl get svc "che-host" -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/$deploy/service.yaml"
     else
       kubectl get svc "$deploy" -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/$deploy/service.yaml"
     fi
@@ -351,13 +382,18 @@ preflight_checks
 
 detect_install
 echo "Detected installation:"
-echo "  * Che Operator installed in namespace $OPERATOR_NS"
+echo "  * $OPERATOR_NAME Operator installed in namespace $OPERATOR_NS"
 echo "  * DevWorkspace Operator installed in namespace $DWO_OPERATOR_NS"
 if [ "$CHECLUSTER_NAME" != "" ]; then
-  echo "  * Che installed in namespace $CHECLUSTER_NS"
+  echo "  * $OPERATOR_NAME installed in namespace $CHECLUSTER_NS"
 fi
 echo ""
 echo "Results will be saved to $OUT_DIR"
+
+DWO_DIR="$OUT_DIR/operators/devworkspace-operator/"
+OPERATOR_DIR="$OUT_DIR/operators/$OPERATOR_DIST-operator/"
+CHECLUSTER_DIR="$OUT_DIR/checluster/"
+WORKSPACE_DIR="$OUT_DIR/devworkspaces/"
 
 if [ $DEBUG_START == "true" ]; then
   set_debug_on_workspace
