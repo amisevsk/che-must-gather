@@ -114,10 +114,6 @@ function parse_arguments() {
 }
 
 function preflight_checks() {
-  if ! kubectl cluster-info >/dev/null 2>&1; then
-    error "Not logged in to any cluster. Please log in an re-run this script"
-    exit 1
-  fi
   if [ -d "$OUT_DIR" ]; then
     error "Directory $OUT_DIR already exists"
     exit 1
