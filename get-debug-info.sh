@@ -39,6 +39,7 @@ DWO_GLOBAL_DWOC_NAME="devworkspace-operator-config"
 # Variables related to DevWorkspace debug information
 WORKSPACE_NAME=""
 WORKSPACE_NAMESPACE=""
+DEBUG_START="false"
 
 USAGE="Usage: ./get-debug-info.sh [OPTIONS]
 
@@ -47,16 +48,19 @@ USAGE="Usage: ./get-debug-info.sh [OPTIONS]
 This script requires kubectl and jq.
 
 Options:
-    -d, --dest-dir <DIRECTORY>
-        Output debug information into specific directory. Directory must not already
-        exist. By default, files will be output to ./che-debug-<timestamp>
     --workspace-name <NAME>
         Gather debugging information on a specific workspace with provided name. Optional
     --workspace-namespace <NAMESPACE>
         Gather debugging information on a specific workspace in provided namespace. Optional
+    --debug-workspace-start
+        Gather debug information for a workspace that fails to start. This will patch the
+        DevWorkspace object to attempt to start it before gathering info.
     --checluster-namespace <NAMESPACE>
         Use provided namespace to search for CheCluster. Optional: by defualt all namespaces
         are searched for CheClusters.
+    -d, --dest-dir <DIRECTORY>
+        Output debug information into specific directory. Directory must not already
+        exist. By default, files will be output to ./che-debug-<timestamp>
     -z, --zip
         Compress debug information to a zip file for sharing in a bug report.
     --help
@@ -98,6 +102,8 @@ function parse_arguments() {
       WORKSPACE_NAMESPACE="$2"; shift;;
       '--checluster-namespace')
       CHECLUSTER_NS="$2"; shift;;
+      '--debug-workspace-start')
+      DEBUG_START="true";;
       '--help')
       print_usage; exit 0;;
       *)
@@ -128,6 +134,10 @@ function preflight_checks() {
   fi
   if [ -z "$WORKSPACE_NAME" ] && [ -n "$WORKSPACE_NAMESPACE" ]; then
     error "Argument '--workspace-name' must be provided when '--workspace-namespace' is used"
+    exit 1
+  fi
+  if [ "$DEBUG_START" == "true" ] && [ -z "$WORKSPACE_NAME" ]; then
+    error "Arguments '--workspace-name' and '--workspace-namespace' must be provided with --debug-workspace-start"
     exit 1
   fi
 }
@@ -187,6 +197,35 @@ function detect_install() {
   fi
 }
 
+# Set the controller.devfile.io/debug-start='true' annotation on the workspace and start it, waiting for it to either
+# enter a Running or Failing phase before continuing. Waiting on phase has a 6 minute timeout
+function set_debug_on_workspace() {
+  info "Starting DevWorkspace $WORKSPACE_NAME in namespace $WORKSPACE_NAMESPACE with debug enabled"
+  kubectl annotate --overwrite devworkspace "$WORKSPACE_NAME" -n "$WORKSPACE_NAMESPACE" controller.devfile.io/debug-start='true' >/dev/null
+  kubectl patch devworkspace "$WORKSPACE_NAME" -n "$WORKSPACE_NAMESPACE" --type merge -p '{"spec": {"started": true}}' >/dev/null
+  info "Waiting for DevWorkspace to enter 'Running' or 'Failing' state (timeout is 3 minutes)."
+  local WORKSPACE_STATE
+  # 3 minute timeout
+  for _ in {1..60}; do
+    WORKSPACE_STATE=$(kubectl get devworkspace "$WORKSPACE_NAME" -n "$WORKSPACE_NAMESPACE" -o json | jq -r '.status.phase')
+    if [ "$WORKSPACE_STATE" == "Running" ] || [ "$WORKSPACE_STATE" == "Failing" ]; then break; fi
+    echo -n "."
+    sleep 3
+  done
+  echo ""
+  case "$WORKSPACE_STATE" in
+  "Running"|"Failing")
+  info "Workspace phase is $WORKSPACE_STATE. Continuing.";;
+  *)
+  warning "Waiting for DevWorkspace timed out. Current DevWorkspace phase is $WORKSPACE_STATE";;
+  esac
+}
+
+# Undo changes from set_debug_on_workspace, removing the controller.devfile.io/debug-start annotation
+function reset_workspace_changes() {
+  kubectl annotate devworkspace "$WORKSPACE_NAME" -n "$WORKSPACE_NAMESPACE" controller.devfile.io/debug-start- >/dev/null 2>&1
+}
+
 # Get logs for all containers in a pod. Files will be named '<deployment-name>.<container-name>.log'
 # Expects parameters:
 #   $1 - name of *deployment* that defines pod
@@ -197,10 +236,11 @@ function pod_logs() {
   local NAMESPACE="$2"
   local OUTPUT_DIR="$3"
   for container in $(kubectl get deploy "$DEPLOY_NAME" -n "$NAMESPACE" -o json | jq -r '.spec.template.spec.containers[].name'); do
-    kubectl logs "deploy/$DEPLOY_NAME" -n "$NAMESPACE" -c "$container" > "$OUTPUT_DIR/$DEPLOY_NAME.$container.log"
+    # Pod may not be running, so don't fail script here if command fails.
+    kubectl logs "deploy/$DEPLOY_NAME" -n "$NAMESPACE" -c "$container" > "$OUTPUT_DIR/$DEPLOY_NAME.$container.log" 2>/dev/null || true
   done
   for container in $(kubectl get deploy "$DEPLOY_NAME" -n "$NAMESPACE" -o json | jq -r '.spec.template.spec.initContainers[]?.name'); do
-    kubectl logs "deploy/$DEPLOY_NAME" -n "$NAMESPACE" -c "$container" > "$OUTPUT_DIR/$DEPLOY_NAME.init-$container.log"
+    kubectl logs "deploy/$DEPLOY_NAME" -n "$NAMESPACE" -c "$container" > "$OUTPUT_DIR/$DEPLOY_NAME.init-$container.log" 2>/dev/null || true
   done
 }
 
@@ -319,6 +359,11 @@ fi
 echo ""
 echo "Results will be saved to $OUT_DIR"
 
+if [ $DEBUG_START == "true" ]; then
+  set_debug_on_workspace
+  trap reset_workspace_changes TERM INT HUP ERR
+fi
+
 gather_devworkspace_operator
 
 gather_che_operator
@@ -333,4 +378,8 @@ fi
 
 if [ "$ZIP" == "true" ]; then
   compress_results
+fi
+
+if [ $DEBUG_START == "true" ]; then
+  reset_workspace_changes
 fi
