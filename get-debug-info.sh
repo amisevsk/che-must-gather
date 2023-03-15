@@ -44,34 +44,51 @@ WORKSPACE_NAME=""
 WORKSPACE_NAMESPACE=""
 DEBUG_START="false"
 
-USAGE="Usage: ./get-debug-info.sh [OPTIONS]
+function print_usage() {
+cat <<EOF
+This is a script used to gather information about a Eclipse Che or Red Hat
+OpenShift Dev Spaces installation that is useful for diagnosing issues.
 
+By default this script will gather the following information:
+  * Any objects owned by the DevWorkspace or Eclipse Che/Dev Spaces operator in
+    each operator's installed namespace
+  * Any objects related to an existing Eclipse Che or Dev Spaces installation
+    in the namespace of a CheCluster resource
+The objects retrieved from the cluster are deployments, pods, services,
+configmaps, services, routes/ingresses, events, and ClusterServiceVersions
+(if present).
 
+In addition, if the --workspace-name and --workspace-namespace options are
+provided, this script will attempt to gather information about the specified
+workspace.
+
+In order to gather information about a workspace that fails to start, the
+--debug-workspace-start option can be used. This will attempt to start the
+workspace before gathering information.
 
 This script requires kubectl and jq.
 
-Options:
-    --workspace-name <NAME>
-        Gather debugging information on a specific workspace with provided name. Optional
-    --workspace-namespace <NAMESPACE>
-        Gather debugging information on a specific workspace in provided namespace. Optional
-    --debug-workspace-start
-        Gather debug information for a workspace that fails to start. This will patch the
-        DevWorkspace object to attempt to start it before gathering info.
-    --checluster-namespace <NAMESPACE>
-        Use provided namespace to search for CheCluster. Optional: by defualt all namespaces
-        are searched for CheClusters.
-    -d, --dest-dir <DIRECTORY>
-        Output debug information into specific directory. Directory must not already
-        exist. By default, files will be output to ./che-debug-<timestamp>
-    -z, --zip
-        Compress debug information to a zip file for sharing in a bug report.
-    --help
-        Print this message.
-"
+Usage: ./get-debug-info.sh [OPTIONS]
 
-function print_usage() {
-  echo -e "$USAGE"
+Options:
+  --workspace-name <NAME>
+      Gather debugging information on a specific workspace with provided name.
+  --workspace-namespace <NAMESPACE>
+      Gather debugging information on a specific workspace in provided namespace.
+  --debug-workspace-start
+      Gather debug information for a workspace that fails to start. This will
+      patch the DevWorkspace object to attempt to start it before gathering data.
+  --checluster-namespace <NAMESPACE>
+      Use provided namespace to search for CheCluster. Optional: by defualt all
+      namespaces are searched for CheClusters.
+  -d, --dest-dir <DIRECTORY>
+      Output debug information into specific directory. Directory must not
+      already exist. By default, files will be output to ./che-debug-<timestamp>
+  -z, --zip
+      Compress debug information to a zip file for sharing in a bug report.
+  --help
+      Print this message.
+EOF
 }
 
 function error() {
