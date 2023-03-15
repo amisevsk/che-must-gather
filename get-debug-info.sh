@@ -377,14 +377,14 @@ parse_arguments "$@"
 preflight_checks
 
 detect_install
-echo "Detected installation:"
-echo "  * $OPERATOR_NAME Operator installed in namespace $OPERATOR_NS"
-echo "  * DevWorkspace Operator installed in namespace $DWO_OPERATOR_NS"
+info "Detected installation:"
+info "  * $OPERATOR_NAME Operator installed in namespace $OPERATOR_NS"
+info "  * DevWorkspace Operator installed in namespace $DWO_OPERATOR_NS"
 if [ "$CHECLUSTER_NAME" != "" ]; then
-  echo "  * $OPERATOR_NAME installed in namespace $CHECLUSTER_NS"
+  info "  * $OPERATOR_NAME installed in namespace $CHECLUSTER_NS"
 fi
-echo ""
-echo "Results will be saved to $OUT_DIR"
+info ""
+info "Results will be saved to $OUT_DIR"
 
 DWO_DIR="$OUT_DIR/operators/devworkspace-operator/"
 OPERATOR_DIR="$OUT_DIR/operators/$OPERATOR_DIST-operator/"
