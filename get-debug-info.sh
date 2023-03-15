@@ -2,13 +2,13 @@
 
 set -e
 
-# Output directories
-SCRIPT_DIR=$(cd "$(dirname "$0")" || exit; pwd)
-OUT_DIR="${SCRIPT_DIR}/che-debug-$(date -u +%y%m%d%H%M%S)/"
-DWO_DIR="$OUT_DIR/operators/devworkspace/"
-OPERATOR_DIR="$OUT_DIR/operators/che-operator/"
-CHECLUSTER_DIR="$OUT_DIR/checluster/"
-WORKSPACE_DIR="$OUT_DIR/devworkspaces/"
+# Output directories; set after detecting installation
+DEFAULT_OUT_DIR="che-debug-$(date -u +%y%m%d%H%M%S)/"
+OUT_DIR=""
+DWO_DIR=""
+OPERATOR_DIR=""
+CHECLUSTER_DIR=""
+WORKSPACE_DIR=""
 
 # Variables to distinguish between Eclipse Che and Dev Spaces installs on OpenShift or Kubernetes
 OPERATOR_DIST=""      # che or devspaces
@@ -83,7 +83,7 @@ Options:
       namespaces are searched for CheClusters.
   -d, --dest-dir <DIRECTORY>
       Output debug information into specific directory. Directory must not
-      already exist. By default, files will be output to ./che-debug-<timestamp>
+      already exist.
   -z, --zip
       Compress debug information to a zip file for sharing in a bug report.
   --help
@@ -173,6 +173,7 @@ function detect_install() {
       DEPLOYMENT_NAMES="che che-dashboard che-gateway devfile-registry plugin-registry"
     elif kubectl get csv -n openshift-operators -o name | grep -q devspacesoperator; then
       OPERATOR_DIST="devspaces"
+      DEFAULT_OUT_DIR="devspaces-debug-$(date -u +%y%m%d%H%M%S)/"
       OPERATOR_NAME="Red Hat OpenShift Dev Spaces"
       OPERATOR_DEPLOY="devspaces-operator"
       OPERATOR_LABEL_SELECTOR="app=devspaces-operator"
@@ -384,16 +385,23 @@ function gather_workspace() {
 }
 
 function compress_results() {
-  info "Compressing debug info to che_debug_info.zip"
+  info "Compressing debug info to ${OPERATOR_DIST}_debug_info.zip"
   pushd "$(dirname "$OUT_DIR")" >/dev/null
-  zip -q -r che_debug_info.zip "$(basename "$OUT_DIR")"
+  zip -q -r "${OPERATOR_DIST}_debug_info.zip" "$(basename "$OUT_DIR")"
   popd >/dev/null
 }
 
 parse_arguments "$@"
-preflight_checks
 
 detect_install
+OUT_DIR="${OUT_DIR:-$DEFAULT_OUT_DIR}"
+DWO_DIR="$OUT_DIR/operators/devworkspace-operator/"
+OPERATOR_DIR="$OUT_DIR/operators/$OPERATOR_DIST-operator/"
+CHECLUSTER_DIR="$OUT_DIR/checluster/"
+WORKSPACE_DIR="$OUT_DIR/devworkspaces/"
+
+preflight_checks
+
 info "Detected installation:"
 info "  * $OPERATOR_NAME Operator installed in namespace $OPERATOR_NS"
 info "  * DevWorkspace Operator installed in namespace $DWO_OPERATOR_NS"
@@ -402,11 +410,6 @@ if [ "$CHECLUSTER_NAME" != "" ]; then
 fi
 info ""
 info "Results will be saved to $OUT_DIR"
-
-DWO_DIR="$OUT_DIR/operators/devworkspace-operator/"
-OPERATOR_DIR="$OUT_DIR/operators/$OPERATOR_DIST-operator/"
-CHECLUSTER_DIR="$OUT_DIR/checluster/"
-WORKSPACE_DIR="$OUT_DIR/devworkspaces/"
 
 if [ $DEBUG_START == "true" ]; then
   set_debug_on_workspace
