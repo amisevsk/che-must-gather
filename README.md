@@ -9,7 +9,7 @@ This script collects information useful when submitting a bug report. It gathers
 * Logs for all involved pods
 * (Optionally) Information about a specific workspace on the cluster
 
-This script requires `kubectl` and `jq`. If `oc` is installed, it will be used to get the OpenShift version for OpenShift clusters.
+This script requires `jq` and either `oc` or `kubectl`. If `oc` is installed, it will be used to get the OpenShift version for OpenShift clusters.
 
 Data is output into the following folder structure (names are different if Dev Spaces is installed instead of Eclipse Che):
 ```bash

@@ -2,6 +2,8 @@
 
 set -e
 
+kubectl="kubectl"
+
 # Output directories; set after detecting installation
 DEFAULT_OUT_DIR="che-debug-$(date -u +%y%m%d%H%M%S)/"
 OUT_DIR=""
@@ -66,7 +68,7 @@ In order to gather information about a workspace that fails to start, the
 --debug-workspace-start option can be used. This will attempt to start the
 workspace before gathering information.
 
-This script requires kubectl and jq.
+This script requires jq and either kubectl or oc.
 
 Usage: ./get-debug-info.sh [OPTIONS]
 
@@ -79,7 +81,7 @@ Options:
       Gather debug information for a workspace that fails to start. This will
       patch the DevWorkspace object to attempt to start it before gathering data.
   --checluster-namespace <NAMESPACE>
-      Use provided namespace to search for CheCluster. Optional: by defualt all
+      Use provided namespace to search for CheCluster. Optional: by default all
       namespaces are searched for CheClusters.
   -d, --dest-dir <DIRECTORY>
       Output debug information into specific directory. Directory must not
@@ -131,15 +133,20 @@ function parse_arguments() {
 }
 
 function preflight_checks() {
-  if [ -d "$OUT_DIR" ]; then
-    error "Directory $OUT_DIR already exists"
-    exit 1
-  fi
-  mkdir -p "$OUT_DIR"
   if ! command -v jq > /dev/null; then
     error "Command-line tool jq is required"
     exit 1
   fi
+
+  if command -v kubectl > /dev/null; then
+    kubectl=kubectl
+  elif command -v oc > /dev/null; then
+    kubectl=oc
+  else
+    error "Could not find kubectl or oc"
+    exit 1
+  fi
+
   if [ -n "$WORKSPACE_NAME" ] && [ -z "$WORKSPACE_NAMESPACE" ]; then
     error "Argument '--workspace-namespace' must be provided when '--workspace-name' is used"
     exit 1
@@ -156,7 +163,7 @@ function preflight_checks() {
 
 function detect_install() {
   # Detect OpenShift or Kubernetes
-  if kubectl api-resources | grep route.openshift.io -q; then
+  if $kubectl api-resources | grep route.openshift.io -q; then
     PLATFORM="openshift"
   else
     PLATFORM="kubernetes"
@@ -164,14 +171,14 @@ function detect_install() {
 
   # Figure out if Eclipse Che or Dev Spaces is installed
   if [ "$PLATFORM" == "openshift" ]; then
-    if kubectl get csv -n openshift-operators -o name | grep -q eclipse-che; then
+    if $kubectl get csv -n openshift-operators -o name | grep -q eclipse-che; then
       OPERATOR_DIST="che"
       OPERATOR_NAME="Eclipse Che"
       OPERATOR_DEPLOY="che-operator"
       OPERATOR_LABEL_SELECTOR="app=che-operator"
       OPERATOR_SERVICE_NAME="che-operator-service"
       DEPLOYMENT_NAMES="che che-dashboard che-gateway devfile-registry plugin-registry"
-    elif kubectl get csv -n openshift-operators -o name | grep -q devspacesoperator; then
+    elif $kubectl get csv -n openshift-operators -o name | grep -q devspacesoperator; then
       OPERATOR_DIST="devspaces"
       DEFAULT_OUT_DIR="devspaces-debug-$(date -u +%y%m%d%H%M%S)/"
       OPERATOR_NAME="Red Hat OpenShift Dev Spaces"
@@ -197,8 +204,8 @@ function detect_install() {
   # Find operator install namespaces and CSVs (if present)
   if [ "$PLATFORM" = "openshift" ]; then
     # CSVs get copied to every namespace, so we can just check openshift-operators even if the operator is not installed there
-    DWO_CSV_NAME=$(kubectl get csv -n openshift-operators -o json | jq -r --arg OPERATOR_NAME "$DWO_OPERATOR_NAME" '.items[] | select(.spec.displayName == $OPERATOR_NAME) | .metadata.name')
-    DWO_OPERATOR_NS=$(kubectl get csv "$DWO_CSV_NAME" -o json | jq -r '
+    DWO_CSV_NAME=$($kubectl get csv -n openshift-operators -o json | jq -r --arg OPERATOR_NAME "$DWO_OPERATOR_NAME" '.items[] | select(.spec.displayName == $OPERATOR_NAME) | .metadata.name')
+    DWO_OPERATOR_NS=$($kubectl get csv "$DWO_CSV_NAME" -o json | jq -r '
       if .status.reason == "InstallSucceeded"
       then
         .metadata.namespace
@@ -206,8 +213,8 @@ function detect_install() {
         .metadata.labels."olm.copiedFrom"
       end
       ')
-    OPERATOR_CSV_NAME=$(kubectl get csv -n openshift-operators -o json | jq -r --arg OPERATOR_NAME "$OPERATOR_NAME" '.items[] | select(.spec.displayName == $OPERATOR_NAME) | .metadata.name')
-    OPERATOR_NS=$(kubectl get csv "$OPERATOR_CSV_NAME" -o json | jq -r '
+    OPERATOR_CSV_NAME=$($kubectl get csv -n openshift-operators -o json | jq -r --arg OPERATOR_NAME "$OPERATOR_NAME" '.items[] | select(.spec.displayName == $OPERATOR_NAME) | .metadata.name')
+    OPERATOR_NS=$($kubectl get csv "$OPERATOR_CSV_NAME" -o json | jq -r '
       if .status.reason == "InstallSucceeded"
       then
         .metadata.namespace
@@ -216,18 +223,18 @@ function detect_install() {
       end
       ')
   else
-    DWO_OPERATOR_NS=$(kubectl get deploy --all-namespaces -l "$DWO_OPERATOR_LABEL_SELECTOR" -o jsonpath="{..metadata.namespace}")
-    OPERATOR_NS=$(kubectl get deploy --all-namespaces -l "$OPERATOR_LABEL_SELECTOR" -o jsonpath="{..metadata.namespace}")
+    DWO_OPERATOR_NS=$($kubectl get deploy --all-namespaces -l "$DWO_OPERATOR_LABEL_SELECTOR" -o jsonpath="{..metadata.namespace}")
+    OPERATOR_NS=$($kubectl get deploy --all-namespaces -l "$OPERATOR_LABEL_SELECTOR" -o jsonpath="{..metadata.namespace}")
   fi
 
   # Find CheCluster to get install namespace
   local CHECLUSTERS NUM_CHECLUSTERS
   if [ -z "$CHECLUSTER_NS" ]; then
     # No namespace specified -- search whole cluster for CheClusters. This requires higher permissions
-    CHECLUSTERS=$(kubectl get checlusters --all-namespaces -o json)
+    CHECLUSTERS=$($kubectl get checlusters --all-namespaces -o json)
     NUM_CHECLUSTERS=$(echo "$CHECLUSTERS" | jq '.items | length')
   else
-    CHECLUSTERS=$(kubectl get checlusters -n "$CHECLUSTER_NS" -o json)
+    CHECLUSTERS=$($kubectl get checlusters -n "$CHECLUSTER_NS" -o json)
     NUM_CHECLUSTERS=$(echo "$CHECLUSTERS" | jq '.items | length')
   fi
   if [ "$NUM_CHECLUSTERS" == "0" ]; then
@@ -245,13 +252,13 @@ function detect_install() {
 # enter a Running or Failing phase before continuing. Waiting on phase has a 6 minute timeout
 function set_debug_on_workspace() {
   info "Starting DevWorkspace $WORKSPACE_NAME in namespace $WORKSPACE_NAMESPACE with debug enabled"
-  kubectl annotate --overwrite devworkspace "$WORKSPACE_NAME" -n "$WORKSPACE_NAMESPACE" controller.devfile.io/debug-start='true' >/dev/null
-  kubectl patch devworkspace "$WORKSPACE_NAME" -n "$WORKSPACE_NAMESPACE" --type merge -p '{"spec": {"started": true}}' >/dev/null
+  $kubectl annotate --overwrite devworkspace "$WORKSPACE_NAME" -n "$WORKSPACE_NAMESPACE" controller.devfile.io/debug-start='true' >/dev/null
+  $kubectl patch devworkspace "$WORKSPACE_NAME" -n "$WORKSPACE_NAMESPACE" --type merge -p '{"spec": {"started": true}}' >/dev/null
   info "Waiting for DevWorkspace to enter 'Running' or 'Failing' state (timeout is 3 minutes)."
   local WORKSPACE_STATE
   # 3 minute timeout
   for _ in {1..60}; do
-    WORKSPACE_STATE=$(kubectl get devworkspace "$WORKSPACE_NAME" -n "$WORKSPACE_NAMESPACE" -o json | jq -r '.status.phase')
+    WORKSPACE_STATE=$($kubectl get devworkspace "$WORKSPACE_NAME" -n "$WORKSPACE_NAMESPACE" -o json | jq -r '.status.phase')
     if [ "$WORKSPACE_STATE" == "Running" ] || [ "$WORKSPACE_STATE" == "Failing" ]; then break; fi
     echo -n "."
     sleep 3
@@ -267,7 +274,7 @@ function set_debug_on_workspace() {
 
 # Undo changes from set_debug_on_workspace, removing the controller.devfile.io/debug-start annotation
 function reset_workspace_changes() {
-  kubectl annotate devworkspace "$WORKSPACE_NAME" -n "$WORKSPACE_NAMESPACE" controller.devfile.io/debug-start- >/dev/null 2>&1
+  $kubectl annotate devworkspace "$WORKSPACE_NAME" -n "$WORKSPACE_NAMESPACE" controller.devfile.io/debug-start- >/dev/null 2>&1
 }
 
 # Get logs for all containers in a pod. Files will be named '<deployment-name>.<container-name>.log'
@@ -279,20 +286,20 @@ function pod_logs() {
   local DEPLOY_NAME="$1"
   local NAMESPACE="$2"
   local OUTPUT_DIR="$3"
-  for container in $(kubectl get deploy "$DEPLOY_NAME" -n "$NAMESPACE" -o json | jq -r '.spec.template.spec.containers[].name'); do
+  for container in $($kubectl get deploy "$DEPLOY_NAME" -n "$NAMESPACE" -o json | jq -r '.spec.template.spec.containers[].name'); do
     # Pod may not be running, so don't fail script here if command fails.
-    kubectl logs "deploy/$DEPLOY_NAME" -n "$NAMESPACE" -c "$container" > "$OUTPUT_DIR/$DEPLOY_NAME.$container.log" 2>/dev/null || true
+    $kubectl logs "deploy/$DEPLOY_NAME" -n "$NAMESPACE" -c "$container" > "$OUTPUT_DIR/$DEPLOY_NAME.$container.log" 2>/dev/null || true
   done
-  for container in $(kubectl get deploy "$DEPLOY_NAME" -n "$NAMESPACE" -o json | jq -r '.spec.template.spec.initContainers[]?.name'); do
-    kubectl logs "deploy/$DEPLOY_NAME" -n "$NAMESPACE" -c "$container" > "$OUTPUT_DIR/$DEPLOY_NAME.init-$container.log" 2>/dev/null || true
+  for container in $($kubectl get deploy "$DEPLOY_NAME" -n "$NAMESPACE" -o json | jq -r '.spec.template.spec.initContainers[]?.name'); do
+    $kubectl logs "deploy/$DEPLOY_NAME" -n "$NAMESPACE" -c "$container" > "$OUTPUT_DIR/$DEPLOY_NAME.init-$container.log" 2>/dev/null || true
   done
 }
 
 function gather_cluster_info() {
   if [ $PLATFORM == "openshift" ] && command -v oc >/dev/null ; then
-    oc version -o json | jq '{serverVersion, openshiftVersion}' > "$OUTPUT_DIR/cluster-version.json"
+    oc version -o json | jq '{serverVersion, openshiftVersion}' > "$OUT_DIR/cluster-version.json"
   else
-    kubectl version -o json | jq '.serverVersion' > "$OUTPUT_DIR/cluster-version.json"
+    $kubectl version -o json | jq '.serverVersion' > "$OUT_DIR/cluster-version.json"
   fi
 }
 
@@ -301,29 +308,29 @@ function gather_devworkspace_operator() {
   mkdir -p "$DWO_DIR"
   if [ "$PLATFORM" == "openshift" ]; then
     # Get CSV
-    kubectl get csv "$DWO_CSV_NAME" -n "$DWO_OPERATOR_NS" -o json | jq -r '.spec.version' > "$DWO_DIR/version.txt"
-    kubectl get csv "$DWO_CSV_NAME" -n "$DWO_OPERATOR_NS" -o yaml > "$DWO_DIR/csv.yaml"
+    $kubectl get csv "$DWO_CSV_NAME" -n "$DWO_OPERATOR_NS" -o json | jq -r '.spec.version' > "$DWO_DIR/version.txt"
+    $kubectl get csv "$DWO_CSV_NAME" -n "$DWO_OPERATOR_NS" -o yaml > "$DWO_DIR/csv.yaml"
   fi
 
   # Gather info about controller
-  kubectl get deploy "$DWO_OPERATOR_DEPLOY" -n "$DWO_OPERATOR_NS" -o yaml > "$DWO_DIR/controller.deploy.yaml"
-  kubectl get po -l "$DWO_OPERATOR_LABEL_SELECTOR" -n "$DWO_OPERATOR_NS" -o yaml > "$DWO_DIR/controller.pods.yaml"
-  kubectl get svc "$DWO_OPERATOR_SERVICE_NAME" -n "$DWO_OPERATOR_NS" -o yaml > "$DWO_DIR/controller.svc.yaml"
+  $kubectl get deploy "$DWO_OPERATOR_DEPLOY" -n "$DWO_OPERATOR_NS" -o yaml > "$DWO_DIR/controller.deploy.yaml"
+  $kubectl get po -l "$DWO_OPERATOR_LABEL_SELECTOR" -n "$DWO_OPERATOR_NS" -o yaml > "$DWO_DIR/controller.pods.yaml"
+  $kubectl get svc "$DWO_OPERATOR_SERVICE_NAME" -n "$DWO_OPERATOR_NS" -o yaml > "$DWO_DIR/controller.svc.yaml"
   pod_logs "$DWO_OPERATOR_DEPLOY" "$DWO_OPERATOR_NS" "$DWO_DIR"
 
   # Gather info about webhooks server
-  kubectl get deploy "$DWO_OPERATOR_WEBHOOKS_DEPLOY" -n "$DWO_OPERATOR_NS" -o yaml > "$DWO_DIR/webhook-server.deploy.yaml"
-  kubectl get po -l "$DWO_OPERATOR_WEBHOOKS_LABEL_SELECTOR" -n "$DWO_OPERATOR_NS" -o yaml > "$DWO_DIR/webhook-server.pods.yaml"
-  kubectl get svc "$DWO_OPERATOR_WEBHOOKS_SERVICE_NAME" -n "$DWO_OPERATOR_NS" -o yaml > "$DWO_DIR/webhook-server.svc.yaml"
+  $kubectl get deploy "$DWO_OPERATOR_WEBHOOKS_DEPLOY" -n "$DWO_OPERATOR_NS" -o yaml > "$DWO_DIR/webhook-server.deploy.yaml"
+  $kubectl get po -l "$DWO_OPERATOR_WEBHOOKS_LABEL_SELECTOR" -n "$DWO_OPERATOR_NS" -o yaml > "$DWO_DIR/webhook-server.pods.yaml"
+  $kubectl get svc "$DWO_OPERATOR_WEBHOOKS_SERVICE_NAME" -n "$DWO_OPERATOR_NS" -o yaml > "$DWO_DIR/webhook-server.svc.yaml"
   pod_logs "$DWO_OPERATOR_WEBHOOKS_DEPLOY" "$DWO_OPERATOR_NS" "$DWO_DIR"
 
   # Gather info about global DWO config, if present
-  if kubectl get dwoc "$DWO_GLOBAL_DWOC_NAME" -n "$DWO_OPERATOR_NS" > /dev/null 2>&1; then
-    kubectl get dwoc "$DWO_GLOBAL_DWOC_NAME" -n "$DWO_OPERATOR_NS" -o yaml > "$DWO_DIR/operator-config.yaml"
+  if $kubectl get dwoc "$DWO_GLOBAL_DWOC_NAME" -n "$DWO_OPERATOR_NS" > /dev/null 2>&1; then
+    $kubectl get dwoc "$DWO_GLOBAL_DWOC_NAME" -n "$DWO_OPERATOR_NS" -o yaml > "$DWO_DIR/operator-config.yaml"
   fi
 
-  kubectl get events -n "$DWO_OPERATOR_NS" -o yaml > "$DWO_DIR/events.yaml" 2>/dev/null
-  kubectl get events -n "$DWO_OPERATOR_NS" > "$DWO_DIR/events.txt" 2>/dev/null
+  $kubectl get events -n "$DWO_OPERATOR_NS" -o yaml > "$DWO_DIR/events.yaml" 2>/dev/null
+  $kubectl get events -n "$DWO_OPERATOR_NS" > "$DWO_DIR/events.txt" 2>/dev/null
 }
 
 function gather_che_operator() {
@@ -331,64 +338,64 @@ function gather_che_operator() {
   mkdir -p "$OPERATOR_DIR"
   if [ "$PLATFORM" == "openshift" ]; then
     # Get CSV
-    kubectl get csv "$OPERATOR_CSV_NAME" -n "$OPERATOR_NS" -o json | jq -r '.spec.version' > "$OPERATOR_DIR/version.txt"
-    kubectl get csv "$OPERATOR_CSV_NAME" -n "$OPERATOR_NS" -o yaml > "$OPERATOR_DIR/csv.yaml"
+    $kubectl get csv "$OPERATOR_CSV_NAME" -n "$OPERATOR_NS" -o json | jq -r '.spec.version' > "$OPERATOR_DIR/version.txt"
+    $kubectl get csv "$OPERATOR_CSV_NAME" -n "$OPERATOR_NS" -o yaml > "$OPERATOR_DIR/csv.yaml"
   fi
 
   # Gather info about controller
-  kubectl get deploy "$OPERATOR_DEPLOY" -n "$OPERATOR_NS" -o yaml > "$OPERATOR_DIR/controller.deploy.yaml"
-  kubectl get po -l "$OPERATOR_LABEL_SELECTOR" -n "$OPERATOR_NS" -o yaml > "$OPERATOR_DIR/controller.pods.yaml"
-  kubectl get svc "$OPERATOR_SERVICE_NAME" -n "$OPERATOR_NS" -o yaml > "$OPERATOR_DIR/controller.svc.yaml"
+  $kubectl get deploy "$OPERATOR_DEPLOY" -n "$OPERATOR_NS" -o yaml > "$OPERATOR_DIR/controller.deploy.yaml"
+  $kubectl get po -l "$OPERATOR_LABEL_SELECTOR" -n "$OPERATOR_NS" -o yaml > "$OPERATOR_DIR/controller.pods.yaml"
+  $kubectl get svc "$OPERATOR_SERVICE_NAME" -n "$OPERATOR_NS" -o yaml > "$OPERATOR_DIR/controller.svc.yaml"
   pod_logs "$OPERATOR_DEPLOY" "$OPERATOR_NS" "$OPERATOR_DIR"
-  kubectl get events -n "$OPERATOR_NS" -o yaml > "$OPERATOR_DIR/events.yaml" 2>/dev/null
-  kubectl get events -n "$OPERATOR_NS" > "$OPERATOR_DIR/events.txt" 2>/dev/null
+  $kubectl get events -n "$OPERATOR_NS" -o yaml > "$OPERATOR_DIR/events.yaml" 2>/dev/null
+  $kubectl get events -n "$OPERATOR_NS" > "$OPERATOR_DIR/events.txt" 2>/dev/null
 }
 
 function gather_checluster() {
   info "Getting information about CheCluster and related deployments"
   mkdir -p "$CHECLUSTER_DIR"
-  kubectl get checlusters "$CHECLUSTER_NAME" -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/checluster.yaml"
+  $kubectl get checlusters "$CHECLUSTER_NAME" -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/checluster.yaml"
   for deploy in $DEPLOYMENT_NAMES; do
     mkdir -p "$CHECLUSTER_DIR/$deploy/"
-    kubectl get deploy "$deploy" -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/$deploy/deployment.yaml"
+    $kubectl get deploy "$deploy" -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/$deploy/deployment.yaml"
     pod_logs "$deploy" "$CHECLUSTER_NS" "$CHECLUSTER_DIR/$deploy/"
     if [ "$deploy" == "che" ] || [ "$deploy" == "devspaces" ]; then
       # Even if the install is Dev Spaces, the service is named che-host
-      kubectl get svc "che-host" -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/$deploy/service.yaml"
+      $kubectl get svc "che-host" -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/$deploy/service.yaml"
     else
-      kubectl get svc "$deploy" -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/$deploy/service.yaml"
+      $kubectl get svc "$deploy" -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/$deploy/service.yaml"
     fi
   done
   if [ "$PLATFORM" = "openshift" ]; then
-    kubectl get routes -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/route.yaml"
+    $kubectl get routes -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/route.yaml"
   else
-    kubectl get ingresses -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/ingress.yaml"
+    $kubectl get ingresses -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/ingress.yaml"
   fi
-  kubectl get dwoc -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/devworkspaceoperatorconfig.yaml"
-  kubectl get events -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/events.yaml" 2>/dev/null
-  kubectl get events -n "$CHECLUSTER_NS" > "$CHECLUSTER_DIR/events.txt" 2>/dev/null
+  $kubectl get dwoc -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/devworkspaceoperatorconfig.yaml"
+  $kubectl get events -n "$CHECLUSTER_NS" -o yaml > "$CHECLUSTER_DIR/events.yaml" 2>/dev/null
+  $kubectl get events -n "$CHECLUSTER_NS" > "$CHECLUSTER_DIR/events.txt" 2>/dev/null
 }
 
 function gather_workspace() {
   info "Getting information about DevWorkspace $WORKSPACE_NAME in namespace $WORKSPACE_NAMESPACE"
   mkdir -p "$WORKSPACE_DIR"
   local DW_ID
-  DW_ID=$(kubectl get devworkspace "$WORKSPACE_NAME" -n "$WORKSPACE_NAMESPACE" -o json | jq -r '.status.devworkspaceId')
-  kubectl get devworkspaces "$WORKSPACE_NAME" -n "$WORKSPACE_NAMESPACE" -o yaml > "$WORKSPACE_DIR/devworkspace.yaml"
-  kubectl get svc -l "controller.devfile.io/devworkspace_id=$DW_ID" -n "$WORKSPACE_NAMESPACE" -o yaml > "$WORKSPACE_DIR/services.yaml"
-  kubectl get deploy -l "controller.devfile.io/devworkspace_id=$DW_ID" -n "$WORKSPACE_NAMESPACE" -o yaml > "$WORKSPACE_DIR/deployments.yaml"
-  kubectl get pods -l "controller.devfile.io/devworkspace_id=$DW_ID" -n "$WORKSPACE_NAMESPACE" -o yaml > "$WORKSPACE_DIR/pods.yaml"
+  DW_ID=$($kubectl get devworkspace "$WORKSPACE_NAME" -n "$WORKSPACE_NAMESPACE" -o json | jq -r '.status.devworkspaceId')
+  $kubectl get devworkspaces "$WORKSPACE_NAME" -n "$WORKSPACE_NAMESPACE" -o yaml > "$WORKSPACE_DIR/devworkspace.yaml"
+  $kubectl get svc -l "controller.devfile.io/devworkspace_id=$DW_ID" -n "$WORKSPACE_NAMESPACE" -o yaml > "$WORKSPACE_DIR/services.yaml"
+  $kubectl get deploy -l "controller.devfile.io/devworkspace_id=$DW_ID" -n "$WORKSPACE_NAMESPACE" -o yaml > "$WORKSPACE_DIR/deployments.yaml"
+  $kubectl get pods -l "controller.devfile.io/devworkspace_id=$DW_ID" -n "$WORKSPACE_NAMESPACE" -o yaml > "$WORKSPACE_DIR/pods.yaml"
   if [ "$PLATFORM" = "openshift" ]; then
-    kubectl get routes -l "controller.devfile.io/devworkspace_id=$DW_ID" -n "$WORKSPACE_NAMESPACE" -o yaml > "$WORKSPACE_DIR/routes.yaml"
+    $kubectl get routes -l "controller.devfile.io/devworkspace_id=$DW_ID" -n "$WORKSPACE_NAMESPACE" -o yaml > "$WORKSPACE_DIR/routes.yaml"
   else
-    kubectl get ingresses -l "controller.devfile.io/devworkspace_id=$DW_ID" -n "$WORKSPACE_NAMESPACE" -o yaml > "$WORKSPACE_DIR/ingresses.yaml"
+    $kubectl get ingresses -l "controller.devfile.io/devworkspace_id=$DW_ID" -n "$WORKSPACE_NAMESPACE" -o yaml > "$WORKSPACE_DIR/ingresses.yaml"
   fi
-  kubectl get cm -l "controller.devfile.io/devworkspace_id=$DW_ID" -n "$WORKSPACE_NAMESPACE" -o yaml > "$WORKSPACE_DIR/workspace-configmaps.yaml"
-  kubectl get cm -l "controller.devfile.io/mount-to-devworkspace" -n "$WORKSPACE_NAMESPACE" -o yaml > "$WORKSPACE_DIR/mounted-configmaps.yaml"
-  kubectl get sa -l "controller.devfile.io/devworkspace_id=$DW_ID" -n "$WORKSPACE_NAMESPACE" -o yaml > "$WORKSPACE_DIR/serviceaccounts.yaml"
-  kubectl get pvc -n "$WORKSPACE_NAMESPACE" -o yaml> "$WORKSPACE_DIR/pvcs.yaml"
-  kubectl get events -n "$WORKSPACE_NAMESPACE" -o yaml > "$WORKSPACE_DIR/events.yaml" 2>/dev/null
-  kubectl get events -n "$WORKSPACE_NAMESPACE" > "$WORKSPACE_DIR/events.txt" 2>/dev/null
+  $kubectl get cm -l "controller.devfile.io/devworkspace_id=$DW_ID" -n "$WORKSPACE_NAMESPACE" -o yaml > "$WORKSPACE_DIR/workspace-configmaps.yaml"
+  $kubectl get cm -l "controller.devfile.io/mount-to-devworkspace" -n "$WORKSPACE_NAMESPACE" -o yaml > "$WORKSPACE_DIR/mounted-configmaps.yaml"
+  $kubectl get sa -l "controller.devfile.io/devworkspace_id=$DW_ID" -n "$WORKSPACE_NAMESPACE" -o yaml > "$WORKSPACE_DIR/serviceaccounts.yaml"
+  $kubectl get pvc -n "$WORKSPACE_NAMESPACE" -o yaml> "$WORKSPACE_DIR/pvcs.yaml"
+  $kubectl get events -n "$WORKSPACE_NAMESPACE" -o yaml > "$WORKSPACE_DIR/events.yaml" 2>/dev/null
+  $kubectl get events -n "$WORKSPACE_NAMESPACE" > "$WORKSPACE_DIR/events.txt" 2>/dev/null
   pod_logs "$DW_ID" "$WORKSPACE_NAMESPACE" "$WORKSPACE_DIR"
 }
 
@@ -401,6 +408,8 @@ function compress_results() {
 
 parse_arguments "$@"
 
+preflight_checks
+
 detect_install
 OUT_DIR="${OUT_DIR:-$DEFAULT_OUT_DIR}"
 DWO_DIR="$OUT_DIR/operators/devworkspace-operator/"
@@ -408,7 +417,11 @@ OPERATOR_DIR="$OUT_DIR/operators/$OPERATOR_DIST-operator/"
 CHECLUSTER_DIR="$OUT_DIR/checluster/"
 WORKSPACE_DIR="$OUT_DIR/devworkspaces/"
 
-preflight_checks
+if [ -d "$OUT_DIR" ]; then
+  error "Directory $OUT_DIR already exists"
+  exit 1
+fi
+mkdir -p "$OUT_DIR"
 
 gather_cluster_info
 
