@@ -288,6 +288,14 @@ function pod_logs() {
   done
 }
 
+function gather_cluster_info() {
+  if [ $PLATFORM == "openshift" ] && command -v oc >/dev/null ; then
+    oc version -o json | jq '{serverVersion, openshiftVersion}' > "$OUTPUT_DIR/cluster-version.json"
+  else
+    kubectl version -o json | jq '.serverVersion' > "$OUTPUT_DIR/cluster-version.json"
+  fi
+}
+
 function gather_devworkspace_operator() {
   info "Getting information about DevWorkspace Operator installation"
   mkdir -p "$DWO_DIR"
@@ -401,6 +409,8 @@ CHECLUSTER_DIR="$OUT_DIR/checluster/"
 WORKSPACE_DIR="$OUT_DIR/devworkspaces/"
 
 preflight_checks
+
+gather_cluster_info
 
 info "Detected installation:"
 info "  * $OPERATOR_NAME Operator installed in namespace $OPERATOR_NS"
